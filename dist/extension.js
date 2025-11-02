@@ -39,111 +39,58 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.setLastSelectedElements = setLastSelectedElements;
+exports.getLastSelectedElements = getLastSelectedElements;
 exports.activate = activate;
 const vscode = __importStar(__webpack_require__(1));
 const playwright_1 = __webpack_require__(2);
+let pageRef = null;
+let highlightEnabled = true;
+let selectedElements = [];
+let conversation = [];
+// === Shared store so chat can see last clicked elements ===
+function setLastSelectedElements(elements) {
+    selectedElements = elements;
+}
+function getLastSelectedElements() {
+    return selectedElements;
+}
+// === Helper: send to LM Studio ===
+async function queryLMStudio(messages) {
+    const response = await fetch('http://localhost:1234/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'qwen/qwen3-coder-30b', messages }),
+    });
+    if (!response.ok)
+        throw new Error(`HTTP ${response.status}`);
+    const result = await response.json();
+    return result.choices?.[0]?.message?.content ?? '';
+}
+// === Helper: extract locators from JSON ===
+function extractLocators(content) {
+    try {
+        const parsed = JSON.parse(content);
+        if (parsed.locators && Array.isArray(parsed.locators))
+            return parsed.locators;
+    }
+    catch { }
+    return [];
+}
+// === Activate extension ===
 function activate(context) {
-    let pageRef = null;
-    let highlightEnabled = true;
-    let selectedElements = []; // store multiple selected elements
-    let conversation = [];
-    // === Helper functions ===
-    async function queryLMStudio(messages) {
-        const response = await fetch('http://localhost:1234/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            // body: JSON.stringify({ model: 'openai/gpt-oss-20b', messages }),
-            body: JSON.stringify({ model: 'qwen/qwen3-coder-30b', messages }),
-        });
-        if (!response.ok)
-            throw new Error(`HTTP ${response.status}`);
-        const result = await response.json();
-        return result.choices?.[0]?.message?.content ?? '';
-    }
-    function extractLocators(content) {
-        console.log('Raw LM Studio response:\n', content);
-        // const cleaned = content.replace(/\/\/.*|\/\*[\s\S]*?\*\//g, '');
-        try {
-            // Somestimes the response includes comments, so we strip them out before parsing
-            const parsed = JSON.parse(content);
-            if (parsed.locators && Array.isArray(parsed.locators))
-                return parsed.locators;
-        }
-        catch {
-            throw new Error(`Failed to parse LM Studio response as JSON: ${content}`);
-        }
-        return [];
-    }
-    async function showLocatorMenu(locators) {
-        while (true) {
-            const items = [];
-            if (locators.length > 0) {
-                items.push({ label: 'LM Studio Suggestions', kind: vscode.QuickPickItemKind.Separator });
-                items.push(...locators.map((loc, i) => ({
-                    label: `Locator #${i + 1}`,
-                    description: loc,
-                    detail: 'Suggested by LM Studio',
-                })));
-            }
-            items.push({ label: '────────────', kind: vscode.QuickPickItemKind.Separator });
-            items.push({
-                label: 'Follow up...',
-                description: 'Ask LM Studio to refine or change locator strategy',
-                detail: 'Send another message with context',
-            });
-            const selected = await vscode.window.showQuickPick(items, {
-                placeHolder: 'Select a locator or ask a follow-up question',
-                matchOnDescription: true,
-                matchOnDetail: true,
-            });
-            if (!selected)
-                break;
-            if (selected.label === 'Follow up...') {
-                const followup = await vscode.window.showInputBox({
-                    prompt: 'Enter your follow-up request for LM Studio',
-                    placeHolder: 'e.g., "Use only CSS selectors" or "Include aria roles"',
-                });
-                if (!followup)
-                    continue;
-                conversation.push({ role: 'user', content: followup });
-                vscode.window.showInformationMessage('Requesting updated locators...');
-                const content = await queryLMStudio(conversation);
-                const newLocators = extractLocators(content);
-                if (newLocators.length > 0) {
-                    conversation.push({ role: 'assistant', content });
-                    locators = newLocators;
-                    continue;
-                }
-                else {
-                    vscode.window.showWarningMessage('No locators returned for follow-up.');
-                }
-            }
-            else {
-                const locator = selected.description || selected.label;
-                vscode.env.clipboard.writeText(locator);
-                vscode.window.showInformationMessage(`Locator copied: ${locator}`);
-                break;
-            }
-        }
-    }
-    // === Main command: open browser ===
+    // --- Command: open browser & element highlighter ---
     const openBrowser = vscode.commands.registerCommand('autolocator.openBrowser', async () => {
         const browser = await playwright_1.chromium.launch({ headless: false });
         const page = await browser.newPage();
         pageRef = page;
         await page.goto('http://192.168.1.202:45245/ui/index.html#/dashboard');
         page.on('console', (msg) => console.log('[Browser]', msg.text()));
-        let fullObject = {};
-        // === Expose functions for browser ===
         await page.exposeFunction('logSelectedElement', async (info) => {
             selectedElements.push(info);
-            fullObject = { ...fullObject, ...info };
-            vscode.window.showInformationMessage(`Selected <${info.tag}> — total selected: ${selectedElements.length}`);
+            setLastSelectedElements(selectedElements);
+            // vscode.window.showInformationMessage(`Selected <${info.tag}> — total: ${selectedElements.length}`);
         });
-        await page.exposeFunction('setHighlightMode', (enabled) => {
-            window.__HIGHLIGHT_MODE_ENABLED__ = enabled;
-        });
-        // === Inject highlighter ===
         await page.evaluate(() => {
             window.__HIGHLIGHT_MODE_ENABLED__ = true;
             const overlay = document.createElement('div');
@@ -182,14 +129,12 @@ function activate(context) {
                 const el = e.target;
                 const pathEls = [];
                 let current = el;
-                // Collect all parent elements up to <main> (inclusive)
                 while (current && current.tagName !== 'HTML') {
                     pathEls.unshift(current);
                     if (current.tagName === 'MAIN')
-                        break; // stop at <main>
+                        break;
                     current = current.parentElement;
                 }
-                // Build readable HTML path string
                 const htmlPath = pathEls
                     .map((el) => {
                     const attrs = Array.from(el.attributes)
@@ -198,69 +143,87 @@ function activate(context) {
                     return `<${el.tagName.toLowerCase()}${attrs ? ' ' + attrs : ''}>`;
                 })
                     .join(' → ');
-                const outerHTML = el.outerHTML;
-                console.log("HTML Path:", htmlPath);
-                console.log("Outer HTML:", outerHTML);
                 // @ts-ignore
                 window.logSelectedElement({
                     tag: el.tagName,
                     id: el.id,
                     className: el.className,
                     htmlPath,
-                    outerHTML,
+                    outerHTML: el.outerHTML,
                 });
             }, true);
         });
-        vscode.window.showInformationMessage('Hover and click elements to add them to your selection. Run "Send Selection" to analyze them.');
+        // vscode.window.showInformationMessage(
+        //   'Hover & click elements to add them. Use the chat "@autolocator" to analyze or refine locators.'
+        // );
     });
-    // === Command: toggle highlight mode ===
+    // --- Command: toggle highlight ---
     const toggleHighlight = vscode.commands.registerCommand('autolocator.toggleHighlightMode', async () => {
         if (!pageRef) {
-            vscode.window.showWarningMessage('Browser is not active yet.');
+            vscode.window.showWarningMessage('Browser not active.');
             return;
         }
         highlightEnabled = !highlightEnabled;
         await pageRef.evaluate((enabled) => {
             window.__HIGHLIGHT_MODE_ENABLED__ = enabled;
         }, highlightEnabled);
-        vscode.window.showInformationMessage(`Highlight mode ${highlightEnabled ? 'enabled ✅' : 'disabled ⏸️'}`);
+        vscode.window.showInformationMessage(`Highlight mode ${highlightEnabled ? 'enabled' : 'disabled'}`);
     });
-    // === Command: send all selected elements ===
-    const sendSelection = vscode.commands.registerCommand('autolocator.sendSelection', async () => {
+    // --- Command: clear selected elements ---
+    const clearSelection = vscode.commands.registerCommand('autolocator.clearSelection', async () => {
         if (selectedElements.length === 0) {
-            vscode.window.showWarningMessage('No elements selected yet.');
+            vscode.window.showInformationMessage('No elements to clear.');
             return;
         }
-        const additionalContext = await vscode.window.showInputBox({
-            prompt: 'Add any additional context for LM Studio (optional)',
-            placeHolder: 'Describe what these elements do or what kind of locators you prefer',
+        const confirm = await vscode.window.showQuickPick(['Yes', 'No'], {
+            title: 'Clear all selected elements?',
+            placeHolder: 'This will remove all stored element selections.',
         });
-        const userPrompt = "Analyze the following elements and suggest Playwright locators:\n\n" +
-            selectedElements.map((el, i) => `Element ${i + 1}:\n${el.outerHTML}`).join('\n\n') +
-            (additionalContext ? `\n\nAdditional context: ${additionalContext}` : '');
-        conversation = [{ role: 'user', content: userPrompt }];
-        vscode.window.showInformationMessage('Requesting locator suggestions from LM Studio...');
+        if (confirm === 'Yes') {
+            selectedElements = [];
+            setLastSelectedElements([]);
+            vscode.window.showInformationMessage('All selected elements cleared.');
+        }
+    });
+    // === Chat participant (unchanged) ===
+    const chat = vscode.chat.createChatParticipant('autolocator.participant', async (request, context, stream, token) => {
+        const userPrompt = request.prompt.trim();
+        const elements = getLastSelectedElements();
+        const htmlContext = elements.length
+            ? elements.map((el, i) => `Element ${i + 1}:\n${el.outerHTML}`).join('\n\n')
+            : '';
+        const fullPrompt = htmlContext.length > 0
+            ? `${userPrompt}\n\nSelected elements:\n${htmlContext}`
+            : userPrompt;
+        // stream.progress('Querying LM Studio…');
         try {
-            const content = await queryLMStudio(conversation);
+            const content = await queryLMStudio([{ role: 'user', content: fullPrompt }]);
             const locators = extractLocators(content);
-            conversation.push({ role: 'assistant', content });
             if (locators.length > 0) {
-                await showLocatorMenu(locators);
+                const formatted = locators.map((l) => `\`\`\`ts\n${l}\n\`\`\``).join('\n');
+                stream.markdown(`**Suggested Playwright Locators:**\n${formatted}`);
+                // const choice = await vscode.window.showQuickPick(locators, {
+                //   title: 'Insert Locator',
+                //   placeHolder: 'Choose a locator to insert into your code',
+                // });
+                if (vscode.window.activeTextEditor) {
+                    // const editor = vscode.window.activeTextEditor;
+                    // await editor.edit((editBuilder) =>
+                    //   editBuilder.insert(editor.selection.active, choice)
+                    // );
+                    // stream.markdown(`✅ Inserted locator:\n\`\`\`ts\n${choice}\n\`\`\``);
+                }
             }
             else {
-                vscode.window.showWarningMessage('LM Studio did not return valid locators.');
+                stream.markdown(`🧠 LM Studio Response:\n${content}`);
             }
         }
         catch (err) {
-            vscode.window.showErrorMessage('Failed to reach LM Studio API.');
-            console.error(err);
-        }
-        finally {
-            selectedElements = []; // clear after sending
+            stream.markdown(`❌ Error: ${err.message}`);
         }
     });
-    // === Register commands ===
-    context.subscriptions.push(openBrowser, toggleHighlight, sendSelection);
+    // Register commands
+    context.subscriptions.push(openBrowser, toggleHighlight, clearSelection, chat);
 }
 
 

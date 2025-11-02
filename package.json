@@ -9,21 +9,32 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
   "main": "./dist/extension.js",
+   "activationEvents": [
+    "onChatParticipant:autolocator.participant"
+  ],
   "contributes": {
     "commands": [
       {
         "command": "autolocator.openBrowser",
-        "title": "Open AutoLocator in Browser"
+        "title": "Autolocator: Open Browser"
       },
       {
         "command": "autolocator.toggleHighlightMode",
-        "title": "Toggle On or Off Highlight Mode for AutoLocator"
+        "title": "Autolocator: Toggle Highlight Mode"
       },
       {
-        "command": "autolocator.sendSelection",
-        "title": "Send selected elements"
+        "command": "autolocator.clearSelection",
+        "title": "Autolocator: Clear Selection"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "autolocator.participant",
+        "name": "autoLocator",
+        "fullName": "AutoLocator",
+        "description": "Generate and refine Playwright locators from selected web elements.",
+        "isSticky": true
       }
     ]
   },
@@ -35,12 +46,13 @@
       "when": "editorTextFocus"
     },
     {
-      "command": "autolocator.sendSelection",
-      "key": "ctrl+alt+s",
-      "mac": "cmd+alt+s",
+      "command": "autolocator.clearSelection",
+      "key": "ctrl+alt+c",
+      "mac": "cmd+alt+c",
       "when": "editorTextFocus"
     }
   ],
+  
   "scripts": {
     "vscode:prepublish": "npm run package",
     "compile": "webpack",
