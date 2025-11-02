@@ -42,20 +42,21 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.setLastSelectedElements = setLastSelectedElements;
 exports.getLastSelectedElements = getLastSelectedElements;
 exports.activate = activate;
+exports.deactivate = deactivate;
 const vscode = __importStar(__webpack_require__(1));
 const playwright_1 = __webpack_require__(2);
+// === Shared global state ===
 let pageRef = null;
 let highlightEnabled = true;
 let selectedElements = [];
-let conversation = [];
-// === Shared store so chat can see last clicked elements ===
+// === Helpers to manage selection ===
 function setLastSelectedElements(elements) {
     selectedElements = elements;
 }
 function getLastSelectedElements() {
     return selectedElements;
 }
-// === Helper: send to LM Studio ===
+// === LM Studio Chat Helper ===
 async function queryLMStudio(messages) {
     const response = await fetch('http://localhost:1234/v1/chat/completions', {
         method: 'POST',
@@ -67,7 +68,7 @@ async function queryLMStudio(messages) {
     const result = await response.json();
     return result.choices?.[0]?.message?.content ?? '';
 }
-// === Helper: extract locators from JSON ===
+// === Extract locators from model output ===
 function extractLocators(content) {
     try {
         const parsed = JSON.parse(content);
@@ -77,87 +78,88 @@ function extractLocators(content) {
     catch { }
     return [];
 }
-// === Activate extension ===
-function activate(context) {
-    // --- Command: open browser & element highlighter ---
-    const openBrowser = vscode.commands.registerCommand('autolocator.openBrowser', async () => {
-        const browser = await playwright_1.chromium.launch({ headless: false });
-        const page = await browser.newPage();
-        pageRef = page;
-        await page.goto('http://192.168.1.202:45245/ui/index.html#/dashboard');
-        page.on('console', (msg) => console.log('[Browser]', msg.text()));
-        await page.exposeFunction('logSelectedElement', async (info) => {
-            selectedElements.push(info);
-            setLastSelectedElements(selectedElements);
-            // vscode.window.showInformationMessage(`Selected <${info.tag}> — total: ${selectedElements.length}`);
-        });
-        await page.evaluate(() => {
-            window.__HIGHLIGHT_MODE_ENABLED__ = true;
-            const overlay = document.createElement('div');
-            Object.assign(overlay.style, {
-                position: 'absolute',
-                pointerEvents: 'none',
-                background: 'rgba(0, 128, 255, 0.2)',
-                border: '2px solid #08f',
-                zIndex: '999999',
-            });
-            document.body.appendChild(overlay);
-            let lastTarget = null;
-            document.addEventListener('mousemove', (e) => {
-                if (!window.__HIGHLIGHT_MODE_ENABLED__) {
-                    overlay.style.width = '0px';
-                    overlay.style.height = '0px';
-                    return;
-                }
-                const target = e.target;
-                if (!target || target === overlay)
-                    return;
-                if (target !== lastTarget) {
-                    const rect = target.getBoundingClientRect();
-                    overlay.style.left = rect.left + window.scrollX + 'px';
-                    overlay.style.top = rect.top + window.scrollY + 'px';
-                    overlay.style.width = rect.width + 'px';
-                    overlay.style.height = rect.height + 'px';
-                    lastTarget = target;
-                }
-            });
-            document.addEventListener('click', (e) => {
-                if (!window.__HIGHLIGHT_MODE_ENABLED__)
-                    return;
-                e.preventDefault();
-                e.stopPropagation();
-                const el = e.target;
-                const pathEls = [];
-                let current = el;
-                while (current && current.tagName !== 'HTML') {
-                    pathEls.unshift(current);
-                    if (current.tagName === 'MAIN')
-                        break;
-                    current = current.parentElement;
-                }
-                const htmlPath = pathEls
-                    .map((el) => {
-                    const attrs = Array.from(el.attributes)
-                        .map((a) => `${a.name}="${a.value}"`)
-                        .join(' ');
-                    return `<${el.tagName.toLowerCase()}${attrs ? ' ' + attrs : ''}>`;
-                })
-                    .join(' → ');
-                // @ts-ignore
-                window.logSelectedElement({
-                    tag: el.tagName,
-                    id: el.id,
-                    className: el.className,
-                    htmlPath,
-                    outerHTML: el.outerHTML,
-                });
-            }, true);
-        });
-        // vscode.window.showInformationMessage(
-        //   'Hover & click elements to add them. Use the chat "@autolocator" to analyze or refine locators.'
-        // );
+// === Browser Setup and Highlighter ===
+async function launchBrowser() {
+    const browser = await playwright_1.chromium.launch({ headless: false });
+    const page = await browser.newPage();
+    pageRef = page;
+    await page.goto('http://192.168.1.202:45245/ui/index.html#/dashboard');
+    page.on('console', (msg) => console.log('[Browser]', msg.text()));
+    await page.exposeFunction('logSelectedElement', async (info) => {
+        selectedElements.push(info);
+        setLastSelectedElements(selectedElements);
     });
-    // --- Command: toggle highlight ---
+    await page.evaluate(() => {
+        window.__HIGHLIGHT_MODE_ENABLED__ = true;
+        const overlay = document.createElement('div');
+        Object.assign(overlay.style, {
+            position: 'absolute',
+            pointerEvents: 'none',
+            background: 'rgba(0, 128, 255, 0.2)',
+            border: '2px solid #08f',
+            zIndex: '999999',
+        });
+        document.body.appendChild(overlay);
+        let lastTarget = null;
+        document.addEventListener('mousemove', (e) => {
+            if (!window.__HIGHLIGHT_MODE_ENABLED__) {
+                overlay.style.width = '0px';
+                overlay.style.height = '0px';
+                return;
+            }
+            const target = e.target;
+            if (!target || target === overlay)
+                return;
+            if (target !== lastTarget) {
+                const rect = target.getBoundingClientRect();
+                overlay.style.left = rect.left + window.scrollX + 'px';
+                overlay.style.top = rect.top + window.scrollY + 'px';
+                overlay.style.width = rect.width + 'px';
+                overlay.style.height = rect.height + 'px';
+                lastTarget = target;
+            }
+        });
+        document.addEventListener('click', (e) => {
+            if (!window.__HIGHLIGHT_MODE_ENABLED__)
+                return;
+            e.preventDefault();
+            e.stopPropagation();
+            const el = e.target;
+            const pathEls = [];
+            let current = el;
+            while (current && current.tagName !== 'HTML') {
+                pathEls.unshift(current);
+                if (current.tagName === 'MAIN')
+                    break;
+                current = current.parentElement;
+            }
+            const htmlPath = pathEls
+                .map((el) => {
+                const attrs = Array.from(el.attributes)
+                    .map((a) => `${a.name}="${a.value}"`)
+                    .join(' ');
+                return `<${el.tagName.toLowerCase()}${attrs ? ' ' + attrs : ''}>`;
+            })
+                .join(' → ');
+            // @ts-ignore
+            window.logSelectedElement({
+                tag: el.tagName,
+                id: el.id,
+                className: el.className,
+                htmlPath,
+                outerHTML: el.outerHTML,
+            });
+        }, true);
+    });
+}
+// === Activate Extension ===
+function activate(context) {
+    // --- Command: open browser and highlighter ---
+    const openBrowser = vscode.commands.registerCommand('autolocator.openBrowser', async () => {
+        await launchBrowser();
+        vscode.window.showInformationMessage('Browser launched. Hover & click elements to capture them for locator generation.');
+    });
+    // --- Command: toggle highlight mode ---
     const toggleHighlight = vscode.commands.registerCommand('autolocator.toggleHighlightMode', async () => {
         if (!pageRef) {
             vscode.window.showWarningMessage('Browser not active.');
@@ -167,7 +169,7 @@ function activate(context) {
         await pageRef.evaluate((enabled) => {
             window.__HIGHLIGHT_MODE_ENABLED__ = enabled;
         }, highlightEnabled);
-        vscode.window.showInformationMessage(`Highlight mode ${highlightEnabled ? 'enabled' : 'disabled'}`);
+        vscode.window.showInformationMessage(`Highlight mode ${highlightEnabled ? 'enabled' : 'disabled'}.`);
     });
     // --- Command: clear selected elements ---
     const clearSelection = vscode.commands.registerCommand('autolocator.clearSelection', async () => {
@@ -185,45 +187,53 @@ function activate(context) {
             vscode.window.showInformationMessage('All selected elements cleared.');
         }
     });
-    // === Chat participant (unchanged) ===
+    // --- Chat participant: uses VS Code chat memory directly ---
     const chat = vscode.chat.createChatParticipant('autolocator.participant', async (request, context, stream, token) => {
         const userPrompt = request.prompt.trim();
-        const elements = getLastSelectedElements();
-        const htmlContext = elements.length
-            ? elements.map((el, i) => `Element ${i + 1}:\n${el.outerHTML}`).join('\n\n')
-            : '';
-        const fullPrompt = htmlContext.length > 0
-            ? `${userPrompt}\n\nSelected elements:\n${htmlContext}`
-            : userPrompt;
-        // stream.progress('Querying LM Studio…');
+        const firstMessage = { role: "user", content: "These are the selected elements:\n" + JSON.stringify(selectedElements, null, 2) };
+        let contentToSend;
+        let convertToLMStudioFormat = [];
+        if (context.history.length > 0) {
+            console.log(context.history);
+            context.history.forEach((turn) => {
+                convertToLMStudioFormat.push({
+                    role: turn.prompt ? 'user' : 'assistant', // Determine role based on presence of prompt or response
+                    content: turn.prompt ? turn.prompt : turn.response[0].value.value
+                });
+            });
+            convertToLMStudioFormat.push({ role: 'user', content: userPrompt });
+            contentToSend = convertToLMStudioFormat;
+        }
+        else {
+            contentToSend = [{ role: 'user', content: userPrompt }];
+        }
         try {
-            const content = await queryLMStudio([{ role: 'user', content: fullPrompt }]);
-            const locators = extractLocators(content);
+            stream.progress('Querying LM Studio…');
+            // Post first message with selected elements
+            contentToSend.unshift(firstMessage);
+            const reply = await queryLMStudio(contentToSend);
+            const locators = extractLocators(reply);
             if (locators.length > 0) {
                 const formatted = locators.map((l) => `\`\`\`ts\n${l}\n\`\`\``).join('\n');
                 stream.markdown(`**Suggested Playwright Locators:**\n${formatted}`);
-                // const choice = await vscode.window.showQuickPick(locators, {
-                //   title: 'Insert Locator',
-                //   placeHolder: 'Choose a locator to insert into your code',
-                // });
-                if (vscode.window.activeTextEditor) {
-                    // const editor = vscode.window.activeTextEditor;
-                    // await editor.edit((editBuilder) =>
-                    //   editBuilder.insert(editor.selection.active, choice)
-                    // );
-                    // stream.markdown(`✅ Inserted locator:\n\`\`\`ts\n${choice}\n\`\`\``);
-                }
             }
             else {
-                stream.markdown(`🧠 LM Studio Response:\n${content}`);
+                stream.markdown(`🧠 LM Studio Response:\n${reply}`);
             }
         }
         catch (err) {
             stream.markdown(`❌ Error: ${err.message}`);
         }
     });
-    // Register commands
+    // Register all commands
     context.subscriptions.push(openBrowser, toggleHighlight, clearSelection, chat);
+}
+// --- Deactivate extension ---
+function deactivate() {
+    if (pageRef) {
+        pageRef.browser()?.close();
+        pageRef = null;
+    }
 }
 
 
