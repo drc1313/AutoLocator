@@ -58,7 +58,7 @@ function getLastSelectedElements() {
 }
 // === LM Studio Chat Helper ===
 async function queryLMStudio(messages) {
-    const response = await fetch('http://localhost:1234/v1/chat/completions', {
+    const response = await fetch('http://192.168.1.254:1234/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: 'qwen/qwen3-coder-30b', messages }),
